@@ -1,13 +1,9 @@
 import numpy as np
-from glob import glob
 
 from tensorflow.keras.utils import Sequence
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Conv2D, Dense, TimeDistributed, ConvLSTM2D, Flatten, BatchNormalization, Reshape, Dropout, Multiply
+from tensorflow.keras.layers import Input, Dense, TimeDistributed, ConvLSTM2D, Flatten, BatchNormalization, Dropout, Multiply
 from tensorflow.keras.optimizers import Adam
-
-from tensorflow import keras
-from keras.utils.vis_utils import plot_model
 
 import sys
 sys.path.insert(0, '/Users/beatrizpaula/Desktop/Tese/Code/RNN-visual-search-master/bia')
@@ -38,7 +34,8 @@ def load_batch(path):
     with np.load(path) as data:
         return [data['rnn_x'], data['label_encodings']], data['rnn_y']
 
-def create_model(task_vector_size, time_steps=None, image_height=10, image_width=16, channels=512, output_size=config.fmap_size[0]*config.fmap_size[1]):#2048
+def create_model(task_vector_size, time_steps=None, image_height=10, image_width=16, channels=512, output_size=config.fmap_size[0] *
+                                                                                                               config.fmap_size[1]):#2048
 
     img_seqs = Input(shape=(time_steps,image_height,image_width,channels))
 

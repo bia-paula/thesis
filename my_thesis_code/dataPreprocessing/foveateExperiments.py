@@ -11,9 +11,14 @@ import matplotlib.pyplot as plt
 from tensorflow import keras
 from tensorflow.keras.utils import Sequence
 from time import time
-import tensorflow as tf
 
+from glob import glob
+import tensorflow as tf
+import sys
+sys.path.insert(0, '/Users/beatrizpaula/Desktop/Tese/my_thesis_code')
 import config
+from foveateImages import smooth_foveate
+import os
 import rnn
 
 def fixated_object(fx, fy, x, y, w, h):
@@ -65,29 +70,209 @@ def cross_validate(K, model_function, vr, **kwargs):
 
     return histories
 
+im_path = "../detectron/000000578751.jpg"
+#plt.imshow(im_path)
+fovea_size = 100
+image = Image.open(im_path)
+img = plt.imshow(image, interpolation='nearest')
+plt.axis('off')
+plt.savefig("test1.png", bbox_inches='tight', pad_inches = 0)
+plt.show()
+image_array = img_to_array(image)
+x = 256
+y = 160
 
-train_path = "/Volumes/DropSave/Tese/dataset/sequences_fixated_in_6_padded_truncated/train_scanpaths_fov100_filtered_7.npz"
-with np.load(train_path) as data:
-    tiny_X = data['rnn_x'][:150]
-    tiny_label_enc = data['label_encodings'][:150]
-    tiny_Y = data['rnn_y'][:150]
+fov_array = smooth_foveate(image_array, x, y, fovea_size)
+fov_image = array_to_img(fov_array)
+img = plt.imshow(fov_array, interpolation='nearest')
+plt.axis('off')
+plt.savefig("test2.png", bbox_inches='tight', pad_inches = 0)
+plt.show()
 
-filename = "/Volumes/DropSave/Tese/dataset/train_tiny"
-np.savez_compressed(filename, rnn_x=tiny_X, label_encodings=tiny_label_enc, rnn_y=tiny_Y)
 
-print("Train Done")
 
-valid_path = "/Volumes/DropSave/Tese/dataset/sequences_fixated_in_6_padded_truncated/valid_scanpaths_fov100_filtered_0.npz"
-with np.load(valid_path) as data:
-    tiny_X = data['rnn_x'][:50]
-    tiny_label_enc = data['label_encodings'][:50]
-    tiny_Y = data['rnn_y'][:50]
 
-filename = "/Volumes/DropSave/Tese/dataset/valid_tiny"
-np.savez_compressed(filename, rnn_x=tiny_X, label_encodings=tiny_label_enc, rnn_y=tiny_Y)
 
-print("Valid Done")
+'''
 
+heatmaps_dir = "/Volumes/DropSave/Tese/dataset/taskencoding_heatmap.npz"
+heatmaps = np.load(heatmaps_dir)["label_heatmap"]
+
+new = np.split(heatmaps, 16, axis=1)
+one_task = heatmaps[0]
+one_task_new = np.split(heatmaps[0], 10)
+one_task_new_arr = np.array(one_task_new)
+
+#one_task_new_arr = np.zeros((10, 16))
+
+#for idx, a in enumerate(one_task_new):
+    #one_task_new_arr[idx, :] = one_task_new[idx]
+
+broadcasted_b = np.broadcast_to(one_task_new_arr, (512, 10, 16))
+broadcasted = np.moveaxis(broadcasted_b, 0, 2)
+
+for i in range(512):
+    if not np.array_equal(one_task_new_arr, broadcasted[:,:,i]):
+        print("FALSE: ", i)
+
+confirm = np.zeros((10, 16))
+for id in range(160):
+    x, y = ind2gridcoord(id)
+    confirm[y, x] = one_task[id]
+
+print(np.array_equal(confirm, one_task_new_arr))
+
+
+
+
+
+
+path = "/Users/beatrizpaula/Desktop/Tese/my_thesis_code/fixationPrediction/fov100_batch64_normal_rnny_onehot_label_histories.npz"
+
+data = np.load(path, allow_pickle=True)
+h = data["histories"]
+dh = h.item()
+
+path = "/Volumes/DropSave/Tese/dataset/human_scanpaths_TP_trainval_train.json"
+
+with open(path) as fp:
+    data = json.load(fp)
+
+count = 0
+total_fixated = 0
+fixated_in_last = 0
+for obs in data:
+    last_fixated = -1
+    for fp_idx in range(min(obs["length"], 7)):
+        x, y, w, h = obs["bbox"]
+        if fixated_object(obs["X"][fp_idx], obs["Y"][fp_idx], x, y, w, h):
+            last_fixated = fp_idx
+    if last_fixated > -1:
+        total_fixated += 1
+        if last_fixated == min(obs["length"]-1, 6):
+            fixated_in_last += 1
+
+    count += 1
+    if count % 10 == 0:
+        print(count, "/", len(data))
+
+print(fixated_in_last)
+print(total_fixated)
+print(count)
+
+
+
+path = "/Volumes/DropSave/Tese/dataset/human_scanpaths_TP_test.json"
+new_file = "/Volumes/DropSave/Tese/dataset/test_dictionary.json"
+with open(path) as file:
+    test_data = json.load(file)
+
+testing_dict = dict()
+
+count = 0
+
+for exp in test_data:
+    name = exp["name"].split(".")[0]
+    task = exp["task"]
+    if not name in testing_dict:
+        new_bbox = exp["bbox"]
+        new_bbox[0] = int(new_bbox[0] * 512/1680)
+        new_bbox[1] = int(new_bbox[1] * 320 / 1050)
+        new_bbox[2] = int(new_bbox[2] * 512 / 1680)
+        new_bbox[3] = int(new_bbox[3] * 320 / 1050)
+        testing_dict[name] = {task: new_bbox}
+        count += 1
+    elif not task in testing_dict[name]:
+        new_bbox = exp["bbox"]
+        new_bbox[0] = int(new_bbox[0] * 512 / 1680)
+        new_bbox[1] = int(new_bbox[1] * 320 / 1050)
+        new_bbox[2] = int(new_bbox[2] * 512 / 1680)
+        new_bbox[3] = int(new_bbox[3] * 320 / 1050)
+        testing_dict[name][task] = new_bbox
+        count += 1
+
+with open(new_file, 'w') as f:
+    json.dump(testing_dict, f)
+
+print(count)
+
+
+testing_pairs = list()
+
+data_dict = {}
+
+testing_dicts =  []
+
+for exp in test_data:
+    pair = list()
+    pair.append(exp["name"])
+    pair.append(exp["task"])
+    #pair.append(exp["bbox"])
+    testing_pairs.append(pair)
+    if not exp["name"] in data_dict:
+        data_dict[exp["name"]] = [exp["task"]]
+        new_bbox = exp["bbox"]
+        new_bbox[0] = int(new_bbox[0] * 512/1680)
+        new_bbox[1] = int(new_bbox[1] * 320 / 1050)
+        new_bbox[2] = int(new_bbox[2] * 512 / 1680)
+        new_bbox[3] = int(new_bbox[3] * 320 / 1050)
+
+        new = {"name": exp["name"], "task": exp["task"], "bbox": new_bbox}
+        testing_dicts.append(new)
+    else:
+        if not exp["task"] in  data_dict[exp["name"]]:
+            data_dict[exp["name"]].append(exp["task"])
+            new_bbox = exp["bbox"]
+            new_bbox[0] = int(new_bbox[0] * 512 / 1680)
+            new_bbox[1] = int(new_bbox[1] * 320 / 1050)
+            new_bbox[2] = int(new_bbox[2] * 512 / 1680)
+            new_bbox[3] = int(new_bbox[3] * 320 / 1050)
+
+            new = {"name": exp["name"], "task": exp["task"], "bbox": new_bbox}
+            testing_dicts.append(new)
+            
+
+testing_set = set(tuple(x) for x in testing_pairs)
+sorted_by_image = sorted(list(testing_set), key=lambda tup: tup[0])
+#testing_set = set(testing_pairs)
+
+new_file = "/Volumes/DropSave/Tese/dataset/test_pairs_id.json"
+
+with open(new_file, 'w') as f:
+    json.dump(testing_dicts, f)
+
+count = 0
+
+for img in data_dict.keys():
+    if len(data_dict[img]) > 1:
+        print(img)
+        print(data_dict[img])
+        count+=1
+print(count)
+print(len(testing_dicts))
+print(len(testing_set))
+
+h1 = np.load("/Users/beatrizpaula/Desktop/Tese/my_thesis_code/fixationPrediction/test5Julbatch128histories1.npz", allow_pickle=True)
+h2 = np.load("/Users/beatrizpaula/Desktop/Tese/my_thesis_code/fixationPrediction/test5Julbatch128histories2.npz", allow_pickle=True)
+
+data1 = h1["histories"]
+data2 = h2["arr_0"]
+
+model1 = data1[0]
+
+for i in range(5):
+    for j in range(10):
+        if lens[f] >= 380 
+            start = 3800 * i + 380 * j
+            finish = start + 380
+            save_X = X[start:finish]
+        print(save_X.shape)
+    print("Batch ", i, " done!")
+first = np.zeros((10,7,10,16))
+second = np.zeros((15,7,10,16))
+
+merge = np.append(first, second, axis=0)
+'''
 '''
 x = range(7,7)
 y = range(6,7)
