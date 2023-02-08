@@ -6,7 +6,7 @@ from glob import glob
 from tensorflow.keras.utils import Sequence
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Conv2D, Dense, TimeDistributed, ConvLSTM2D, Flatten, BatchNormalization, \
-    Reshape, Dropout, Multiply, MaxPool3D, Concatenate
+    Reshape, Dropout, Multiply, MaxPool3D, Concatenate, Conv3D
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 from keras.utils.vis_utils import plot_model
@@ -20,7 +20,7 @@ from dataPreprocessing.foveateImages import get_circular_hard_foveate_dcb, gridc
 
 import config
 
-global_data_path = "/Volumes/DropSave/Tese/dataset/smaller_batches_padded_truncated"  # <-----------------  sequences by n fixations
+global_data_path = "/Volumes/DropSave/Tese/dataset/sequences_by_nfixations"  # <-----------------  sequences by n fixations
 
 
 # Load fp data as Sequence for keras
@@ -48,7 +48,7 @@ class BatchSequence(Sequence):
                                          + str(batchSize) + "/train_scanpaths_fov100_batch" + str(
                     batchSize) + "." + str(k) + "*"))
         else:'''
-        if hard_panoptic[0]:
+        if hard_panoptic:
             if not val:
                 p = os.path.join(data_path, "batchSize" + str(256), "train*")
 
@@ -78,8 +78,9 @@ class BatchSequence(Sequence):
                                      str(fovea_size) + "*")
 
         self.arr = np.array(glob(p))
-        np.random.shuffle(self.arr)
-        print(self.arr)
+        #np.random.shuffle(self.arr)
+        self.arr.sort()
+        print(self.arr[0])
 
         self.hs_first = hs_first
         self.panoptic = panoptic
@@ -135,7 +136,7 @@ def load_label_encoding(data, path, label_encoding_heatmap, panoptic):
 
 
 # hard_panoptic: [blur, fovea_radius]
-def load_rnn_x(data, hard_panoptic, accum=0, r=1, rnn_y=None):
+def load_rnn_x(data, hard_panoptic=0, accum=1, r=1, rnn_y=None):
     if hard_panoptic[0]:
         dicts_list = data['rnn_x']
         rnn_x = []
@@ -146,9 +147,10 @@ def load_rnn_x(data, hard_panoptic, accum=0, r=1, rnn_y=None):
             hr = obs['H']
             l_key = "L" + str(hard_panoptic[1])
             lr = obs[l_key]
-            rnn_x.append(get_circular_hard_foveate_dcb(ind, hr, lr, r=r, accumulate=accum))
+            rnn_x.append(get_circular_hard_foveate_dcb(ind, hr, lr, r=r))
 
-        rnn_x = np.array(rnn_x)
+
+        rnn_x = np.array(rnn_x, dtype="float64")
 
     else:
         rnn_x = data['rnn_x']
@@ -171,7 +173,6 @@ def load_batch(path, rnn_y_normal, label_encoding_heatmap, left, panoptic, hard_
         '''if left:
             rnn_x = pad_sequences(rnn_x, dtype="float64", truncating="post", maxlen=4)
             rnn_y = pad_sequences(rnn_y, dtype="float64", truncating="post", maxlen=4)'''
-
         return [rnn_x, label_enc], rnn_y
 
 
@@ -189,28 +190,35 @@ def create_model(task_vector_size, label_encoding_heatmap=0, time_steps=None, im
     else:
         task = Input(shape=(time_steps, image_height, image_width, task_vector_size))
         # ftask = Dense(1000, activation = 'relu')(task)
-        offsets = Dense(channels, activation='tanh')(task)
-        offsets = Dropout(.5)(offsets)
+        '''offsets = Dense(channels, activation='tanh')(task)
+        offsets = Dropout(.5)(offsets)'''
         # offsets = Reshape(target_shape = (channels,1,1))(offsets)
-        combinedInput = Multiply()([img_seqs_in, offsets])
-        ''' combinedInput = Concatenate(axis=-1)([img_seqs_in, task])'''
+        '''combinedInput = Multiply()([img_seqs_in, offsets])'''
+        combinedInput = Concatenate(axis=-1)([img_seqs_in, task])
 
     # combinedInput = BatchNormalization()(combinedInput) #new
 
-    y = ConvLSTM2D(filters=5, strides=2, kernel_size=4, return_sequences=True, activation='relu')(combinedInput)
+    embedding = Dense(units=150, activation='relu')(combinedInput)
+
+    '''embedding_conv1 = Conv3D(filters=80, kernel_size=(1, 2, 2), padding='same', activation='relu')(embedding)
+
+    embedding_conv2 = Conv3D(filters=40, kernel_size=(1, 2, 2), padding='same', activation='relu')(embedding_conv1)
+
+    embedding_conv2 = BatchNormalization()(embedding_conv2)'''
+
+    '''y1 = ConvLSTM2D(filters=20, kernel_size=(2,2), padding='same', return_sequences=True, activation='relu')(embedding)
+    # y = Dropout(.2)(y) #new
+    y1 = BatchNormalization()(y1)'''
+    y = ConvLSTM2D(filters=10, kernel_size=(2, 2), padding='same', return_sequences=True, activation='relu')(embedding)
     # y = Dropout(.2)(y) #new
     y = BatchNormalization()(y)
-    y = ConvLSTM2D(filters=5, kernel_size=4, padding='same', return_sequences=True, activation='relu')(y)
-    y = BatchNormalization()(y)
-    y = ConvLSTM2D(filters=5, kernel_size=4, padding='same', return_sequences=True, activation='relu')(y)
-    y = BatchNormalization()(y)
-    y = ConvLSTM2D(filters=5, kernel_size=4, padding='same', return_sequences=True, activation='relu')(y)
-    y = BatchNormalization()(y)
-    y = ConvLSTM2D(filters=5, kernel_size=4, padding='same', return_sequences=True, activation='relu')(y)
-    y = BatchNormalization()(y)
 
-    z = TimeDistributed(Flatten())(y)
-    out = Dense(output_size, activation='softmax', name='output')(z)
+
+    out = Conv3D(filters=1, kernel_size=(2, 2, 2), padding='same', activation='softmax')(y)
+    out = TimeDistributed(Flatten())(out)
+
+    #z = TimeDistributed(Flatten())(y)
+    #out = Dense(output_size, activation='softmax', name='output')(z)
 
     model_rnn = Model([img_seqs, task], out)
 

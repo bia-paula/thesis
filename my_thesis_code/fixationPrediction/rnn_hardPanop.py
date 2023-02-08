@@ -6,21 +6,23 @@ from glob import glob
 from tensorflow.keras.utils import Sequence
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Conv2D, Dense, TimeDistributed, ConvLSTM2D, Flatten, BatchNormalization, \
-    Reshape, Dropout, Multiply, MaxPool3D, Concatenate
+    Reshape, Dropout, Multiply, MaxPool3D, Concatenate, Conv3D, UpSampling3D, Softmax
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 from keras.utils.vis_utils import plot_model
+from tensorflow.keras.metrics import BinaryAccuracy, Precision, Recall
+from tensorflow.keras.regularizers import L1
 import random
 
 import sys
 
 sys.path.insert(0, '/Users/beatrizpaula/Desktop/Tese/my_thesis_code')
-from dataPreprocessing.gaussianFPGT import onehotrnny2gaussian2d
+from dataPreprocessing.gaussianFPGT import onehotrnny2gaussian2d, onehotrnny2distdamping
 from dataPreprocessing.foveateImages import get_circular_hard_foveate_dcb, gridcoord2ind
 
 import config
 
-global_data_path = "/Volumes/DropSave/Tese/dataset/smaller_batches_padded_truncated"  # <-----------------  sequences by n fixations
+global_data_path = "/Volumes/DropSave/Tese/dataset/sequences_by_nfixations"  # <-----------------  sequences by n fixations
 
 
 # Load fp data as Sequence for keras
@@ -28,7 +30,7 @@ global_data_path = "/Volumes/DropSave/Tese/dataset/smaller_batches_padded_trunca
 # batchSize selects folder for data with batches of that size
 class BatchSequence(Sequence):
     # val = True for validation
-    def __init__(self, k, val, batchSize, rnn_y_normal, label_encoding_heatmap, split=1, fovea_size=100, hs=0,
+    def __init__(self, k, val, batchSize, rnn_y_normal, label_encoding_heatmap, fovea_size=100, hs=0,
                  hs_first=0,
                  panoptic=0, hard_panoptic=None, accum=0, r=1, data_path=global_data_path):
         if hard_panoptic is None:
@@ -48,7 +50,7 @@ class BatchSequence(Sequence):
                                          + str(batchSize) + "/train_scanpaths_fov100_batch" + str(
                     batchSize) + "." + str(k) + "*"))
         else:'''
-        if hard_panoptic[0]:
+        if hard_panoptic:
             if not val:
                 p = os.path.join(data_path, "batchSize" + str(256), "train*")
 
@@ -78,8 +80,9 @@ class BatchSequence(Sequence):
                                      str(fovea_size) + "*")
 
         self.arr = np.array(glob(p))
-        np.random.shuffle(self.arr)
-        print(self.arr)
+        #np.random.shuffle(self.arr)
+        self.arr.sort()
+        print(self.arr[0])
 
         self.hs_first = hs_first
         self.panoptic = panoptic
@@ -96,11 +99,12 @@ class BatchSequence(Sequence):
                           self.hard_panoptic, self.accum, self.r)
 
 
-# Loads rnn_y depending on fp ground truth encoding
+# Loads rnn_y depending on fp ground truth encoding --------------------------------------------------------------
 def load_rnn_y(data, rnn_y_normal):
     rnn_y = data['rnn_y']
     if rnn_y_normal:
         rnn_y = np.apply_along_axis(onehotrnny2gaussian2d, 2, rnn_y, sigma=1)
+        #rnn_y = np.apply_along_axis(onehotrnny2distdamping, 2, rnn_y)
 
     '''if rnn_y_normal:
         batchSizeVal = path.split("batchSize")[-1].split("/")[0]
@@ -135,7 +139,7 @@ def load_label_encoding(data, path, label_encoding_heatmap, panoptic):
 
 
 # hard_panoptic: [blur, fovea_radius]
-def load_rnn_x(data, hard_panoptic, accum=0, r=1, rnn_y=None):
+def load_rnn_x(data, hard_panoptic=0, accum=1, r=1, rnn_y=None):
     if hard_panoptic[0]:
         dicts_list = data['rnn_x']
         rnn_x = []
@@ -146,9 +150,10 @@ def load_rnn_x(data, hard_panoptic, accum=0, r=1, rnn_y=None):
             hr = obs['H']
             l_key = "L" + str(hard_panoptic[1])
             lr = obs[l_key]
-            rnn_x.append(get_circular_hard_foveate_dcb(ind, hr, lr, r=r, accumulate=accum))
+            rnn_x.append(get_circular_hard_foveate_dcb(ind, hr, lr, r=r))
 
-        rnn_x = np.array(rnn_x)
+
+        rnn_x = np.array(rnn_x, dtype="float64")
 
     else:
         rnn_x = data['rnn_x']
@@ -171,18 +176,17 @@ def load_batch(path, rnn_y_normal, label_encoding_heatmap, left, panoptic, hard_
         '''if left:
             rnn_x = pad_sequences(rnn_x, dtype="float64", truncating="post", maxlen=4)
             rnn_y = pad_sequences(rnn_y, dtype="float64", truncating="post", maxlen=4)'''
-
         return [rnn_x, label_enc], rnn_y
 
+metrics = ['categorical_accuracy']
+#metrics = ['categorical_accuracy', 'mean_squared_error', 'mean_absolute_error']
 
 def create_model(task_vector_size, label_encoding_heatmap=0, time_steps=None, image_height=config.fmap_size[0],
-                 image_width=config.fmap_size[1], channels=config.fmap_size[2],
-                 output_size=config.fmap_size[0] * config.fmap_size[1], panoptic_sf_max=0):  # 2048
+                 image_width=config.fmap_size[1], channels=config.fmap_size[2], depth=1, sigmoid=0):
 
-    img_seqs = Input(shape=(time_steps, image_height, image_width, channels))
+    img_seqs = Input(shape=(time_steps, image_height, image_width, channels), dtype="float64")
     img_seqs_in = img_seqs
-    '''if panoptic_sf_max:
-        img_seqs_in = MaxPool3D(pool_size=(1, 2, 2))(img_seqs)'''
+
     if label_encoding_heatmap == 2:
         task = Input(shape=(image_height, image_width, channels))
         combinedInput = Multiply()([img_seqs_in, task])
@@ -193,31 +197,78 @@ def create_model(task_vector_size, label_encoding_heatmap=0, time_steps=None, im
         offsets = Dropout(.5)(offsets)
         # offsets = Reshape(target_shape = (channels,1,1))(offsets)
         combinedInput = Multiply()([img_seqs_in, offsets])
-        ''' combinedInput = Concatenate(axis=-1)([img_seqs_in, task])'''
+        #combinedInput = Concatenate(axis=-1)([img_seqs_in, task])
 
-    # combinedInput = BatchNormalization()(combinedInput) #new
+    conv = combinedInput
 
     y = ConvLSTM2D(filters=5, strides=2, kernel_size=4, return_sequences=True, activation='relu')(combinedInput)
-    # y = Dropout(.2)(y) #new
-    y = BatchNormalization()(y)
-    y = ConvLSTM2D(filters=5, kernel_size=4, padding='same', return_sequences=True, activation='relu')(y)
-    y = BatchNormalization()(y)
-    y = ConvLSTM2D(filters=5, kernel_size=4, padding='same', return_sequences=True, activation='relu')(y)
-    y = BatchNormalization()(y)
-    y = ConvLSTM2D(filters=5, kernel_size=4, padding='same', return_sequences=True, activation='relu')(y)
-    y = BatchNormalization()(y)
-    y = ConvLSTM2D(filters=5, kernel_size=4, padding='same', return_sequences=True, activation='relu')(y)
-    y = BatchNormalization()(y)
-
     z = TimeDistributed(Flatten())(y)
-    out = Dense(output_size, activation='softmax', name='output')(z)
+    out = Dense(image_height*image_width, activation='softmax', name='output')(z)
+
+    '''for d in range(depth):
+        conv = ConvLSTM2D(filters=10, kernel_size=3, padding='same', return_sequences=True)(
+            conv)
+        conv = BatchNormalization()(conv)
+
+    if sigmoid:
+        out = Conv2D(filters=1, kernel_size=(2, 2), padding='same', activation='sigmoid')
+        out = TimeDistributed(out)(conv)
+        out = TimeDistributed(Flatten())(out)
+
+    else:
+        out = Conv3D(filters=1, kernel_size=(2, 2, 2), padding='same', activation='relu')
+        out = TimeDistributed(Flatten())(out)
+        out = Dense(units=160, activation='softmax')(out)'''
+
+    '''embedding = Dense(units=152, activation='relu')(combinedInput)
+    embedding = Dropout(rate=0.2)(embedding)
+
+    embedding = TimeDistributed(Conv2D(filters=80, kernel_size=(2,2), padding='same', activation='relu'))(embedding)
+    embedding = BatchNormalization()(embedding)
+
+
+
+    conv = ConvLSTM2D(filters=20, kernel_size=2, padding='same', return_sequences=True, activation='relu')(conv)
+    conv = BatchNormalization()(conv)
+
+    conv = ConvLSTM2D(filters=10, kernel_size=2, padding='same', return_sequences=True, activation='relu')(conv)
+    conv = BatchNormalization()(conv)'''
+
+    #Experiment depth of convLSTM
+    '''input_conv = combinedInput
+    if not maintain_size:
+        input_conv = ConvLSTM2D(filters=5, kernel_size=4, strides=2, return_sequences=True, activation='relu')(
+            input_conv)
+        input_conv = BatchNormalization()(input_conv)
+        convs -= 1
+
+    print("Convs: ", convs)
+
+    for i in range(convs):
+        print(i, "-"),
+        input_conv = ConvLSTM2D(filters=5, kernel_size=4, padding='same', return_sequences=True, activation='relu')(input_conv)
+        input_conv = BatchNormalization()(input_conv)
+    print()
+    output_convs = input_conv'''
+
+    '''out = Conv2D(filters=1, kernel_size=(2, 2), padding='same', activation='sigmoid')#(output_convs)
+    out = TimeDistributed(out)(conv)
+    out = TimeDistributed(Flatten())(out)
+    out = Softmax()(out)'''
+
+    #out = TimeDistributed(Flatten())(output_convs)
+    #out = Dense(units=output_size, activation="softmax")(out)
 
     model_rnn = Model([img_seqs, task], out)
+    #metrics = [Precision(), Recall()]
+    #loss KLDivergence
+    #kullback_leibler_divergence categorical_crossentropy
 
     model_rnn.compile(loss='categorical_crossentropy', optimizer=Adam(learning_rate=1e-3),
-                      metrics=['categorical_accuracy'])  # rmsprop
+                      metrics=metrics)  # rmsprop
 
     model_rnn.summary()
+    print(model_rnn.loss)
     return model_rnn
 
 
